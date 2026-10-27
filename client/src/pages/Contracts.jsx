@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 
 import api from "../services/api";
+import { useNotifications } from "../contexts/NotificationContext";
 
 const statusOptions = [
   "All Status",
@@ -400,6 +401,7 @@ function LoadingState() {
 
 function Contracts() {
   const navigate = useNavigate();
+  const { notify } = useNotifications();
   const [searchParams, setSearchParams] = useSearchParams();
   const [contracts, setContracts] = useState([]);
 
@@ -420,7 +422,6 @@ function Contracts() {
   });
   const [uploadFile, setUploadFile] = useState(null);
   const [uploadError, setUploadError] = useState("");
-  const [uploadSuccess, setUploadSuccess] = useState("");
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef(null);
 
@@ -473,7 +474,6 @@ function Contracts() {
   }, [loadContracts]);
 
   const openUploadModal = () => {
-    setUploadSuccess("");
     setUploadForm({
       contractName: "",
       vendorName: "",
@@ -588,14 +588,15 @@ function Contracts() {
         description: "",
       });
       setUploadFile(null);
-      setUploadSuccess("Contract uploaded successfully.");
+      notify("Contract uploaded successfully.", "success");
 
       await loadContracts(false);
     } catch (requestError) {
-      setUploadError(
+      notify(
         requestError.response?.data?.message ||
           requestError.message ||
           "Failed to upload contract.",
+        "error",
       );
     } finally {
       setUploading(false);
@@ -732,12 +733,6 @@ function Contracts() {
             Upload contract
           </button>
         </div>
-
-        {uploadSuccess && (
-          <p role="status" className="mt-5 rounded-xl border border-emerald-500/15 bg-emerald-500/[0.05] px-4 py-3 text-sm text-emerald-300">
-            {uploadSuccess}
-          </p>
-        )}
 
         <div className="mt-7 grid grid-cols-2 gap-3 lg:grid-cols-4">
           <div className="rounded-2xl border border-white/[0.07] bg-white/[0.025] p-4">

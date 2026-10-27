@@ -16,6 +16,8 @@ import {
 } from "lucide-react";
 
 import api from "../services/api";
+import { useNotifications } from "../contexts/NotificationContext";
+import ConfirmationModal from "../components/ConfirmationModal";
 
 const STATUS_OPTIONS = ["All Status", "Active", "Inactive"];
 
@@ -401,7 +403,7 @@ function InvitationStatusBadge({ status }) {
   );
 }
 
-function InvitationForm({ busy, feedback, onInvite }) {
+function InvitationForm({ busy, onInvite }) {
   const [email, setEmail] = useState("");
   const [validationError, setValidationError] = useState("");
 
@@ -458,12 +460,7 @@ function InvitationForm({ busy, feedback, onInvite }) {
           {busy ? "Sending..." : "Send invitation"}
         </button>
       </form>
-      {(validationError || feedback?.message) && (
-        <p role={feedback?.type === "error" || validationError ? "alert" : "status"}
-          className={`mt-3 text-sm ${feedback?.type === "success" && !validationError ? "text-emerald-300" : "text-red-300"}`}>
-          {validationError || feedback?.message}
-        </p>
-      )}
+      {validationError && <p role="alert" className="mt-3 text-sm text-red-300">{validationError}</p>}
     </section>
   );
 }
@@ -472,7 +469,6 @@ function InvitationsSection({
   invitations,
   loading,
   error,
-  actionFeedback,
   activeAction,
   onRetry,
   onResend,
@@ -493,13 +489,6 @@ function InvitationsSection({
             Retry
           </button>
         </div>
-      )}
-
-      {actionFeedback && (
-        <p role={actionFeedback.type === "error" ? "alert" : "status"}
-          className={`mx-4 mt-4 text-sm sm:mx-5 ${actionFeedback.type === "success" ? "text-emerald-300" : "text-red-300"}`}>
-          {actionFeedback.message}
-        </p>
       )}
 
       {loading ? (
@@ -547,6 +536,7 @@ function InvitationsSection({
 }
 
 function Reviewers() {
+  const { notify } = useNotifications();
   const [reviewers, setReviewers] = useState([]);
   const [invitations, setInvitations] = useState([]);
 
@@ -558,11 +548,10 @@ function Reviewers() {
   const [reviewersError, setReviewersError] = useState("");
   const [invitationsLoading, setInvitationsLoading] = useState(true);
   const [invitationsError, setInvitationsError] = useState("");
-  const [invitationFormFeedback, setInvitationFormFeedback] = useState(null);
-  const [invitationActionFeedback, setInvitationActionFeedback] = useState(null);
   const [creatingInvitation, setCreatingInvitation] = useState(false);
   const [activeInvitationAction, setActiveInvitationAction] = useState(null);
   const [updatingId, setUpdatingId] = useState(null);
+  const [confirmation, setConfirmation] = useState(null);
 
   const loadReviewers = useCallback(async () => {
     try {
@@ -626,35 +615,24 @@ function Reviewers() {
 
   const handleCreateInvitation = async (email) => {
     setCreatingInvitation(true);
-    setInvitationFormFeedback(null);
 
     try {
       const response = await api.post("/reviewer-invitations", { email });
       if (!response.data?.success) throw new Error("Invitation request failed");
       await refreshManagementData();
-      setInvitationFormFeedback({
-        type: "success",
-        message: `Invitation sent to ${email}.`,
-      });
+      notify(`Invitation sent to ${email}.`, "success");
       return true;
     } catch (error) {
-      setInvitationFormFeedback({
-        type: "error",
-        message: getSafeInvitationError(error, "send the invitation"),
-      });
+      notify(getSafeInvitationError(error, "send the invitation"), "error");
       return false;
     } finally {
       setCreatingInvitation(false);
     }
   };
 
-  const handleInvitationAction = async (invitation, action) => {
-    if (action === "revoke" && !window.confirm(`Revoke the invitation for ${invitation.invited_email}?`)) {
-      return;
-    }
-
+  const performInvitationAction = async (invitation, action) => {
+    const isRevocation = action === "revoke";
     setActiveInvitationAction({ id: invitation.id, type: action });
-    setInvitationActionFeedback(null);
 
     try {
       if (action === "resend") {
@@ -664,23 +642,37 @@ function Reviewers() {
       }
 
       await refreshManagementData();
-      setInvitationActionFeedback({
-        type: "success",
-        message: action === "resend"
+      notify(
+        action === "resend"
           ? `A new invitation email was sent to ${invitation.invited_email}.`
           : `The invitation for ${invitation.invited_email} was revoked.`,
-      });
+        "success",
+      );
     } catch (error) {
       if ([409, 410].includes(error.response?.status)) {
         await refreshManagementData();
       }
-      setInvitationActionFeedback({
-        type: "error",
-        message: getSafeInvitationError(error, `${action} the invitation`),
-      });
+      notify(getSafeInvitationError(error, `${action} the invitation`), "error");
+      if (isRevocation) throw error;
     } finally {
       setActiveInvitationAction(null);
     }
+  };
+
+  const handleInvitationAction = (invitation, action) => {
+    if (action !== "revoke") {
+      void performInvitationAction(invitation, action);
+      return;
+    }
+
+    setConfirmation({
+      title: "Revoke reviewer invitation?",
+      message: `Revoke the invitation for ${invitation.invited_email}? The invitation link will no longer work.`,
+      confirmLabel: "Revoke invitation",
+      destructive: true,
+      errorMessage: "Unable to revoke the invitation. Please try again.",
+      onConfirm: () => performInvitationAction(invitation, action),
+    });
   };
 
   const activeReviewers = reviewers.filter(
@@ -733,57 +725,36 @@ function Reviewers() {
   const handleToggleReviewer = async (reviewer) => {
     const nextIsActive = reviewer.status !== "Active";
 
-    const confirmed = window.confirm(
-      nextIsActive
-        ? `Activate ${reviewer.name}?`
-        : `Deactivate ${reviewer.name}?`,
-    );
-
-    if (!confirmed) {
-      return;
-    }
-
-    try {
-      setUpdatingId(reviewer.id);
-      setReviewersError("");
-
-      const response = await api.patch(
-        `/reviewers/${reviewer.id}`,
-        {
-          isActive: nextIsActive,
-        },
-      );
-
-      if (!response.data?.success) {
-        throw new Error(
-          response.data?.message ||
-            "Failed to update reviewer.",
-        );
-      }
-
-      const updatedReviewer = normalizeReviewer(
-        response.data.reviewer,
-      );
-
-      setReviewers((current) =>
-        current.map((item) =>
-          item.id === reviewer.id
-            ? updatedReviewer
-            : item,
-        ),
-      );
-    } catch (requestError) {
-      const statusCode = requestError.response?.status;
-      setReviewersError(
-        statusCode === 401
-          ? "Your session has expired. Sign in and try again."
-          : statusCode === 403
-            ? "You do not have permission to update reviewers."
-            : "Unable to update this reviewer. Please try again.",
-      );
-    } finally {
-      setUpdatingId(null);
-    }
+    setConfirmation({
+      title: `${nextIsActive ? "Activate" : "Deactivate"} reviewer?`,
+      message: `${nextIsActive ? "Activate" : "Deactivate"} ${reviewer.name}?`,
+      confirmLabel: nextIsActive ? "Activate reviewer" : "Deactivate reviewer",
+      destructive: !nextIsActive,
+      errorMessage: "Unable to update this reviewer. Please try again.",
+      onConfirm: async () => {
+        try {
+          setUpdatingId(reviewer.id);
+          const response = await api.patch(`/reviewers/${reviewer.id}`, { isActive: nextIsActive });
+          if (!response.data?.success) throw new Error("Reviewer update failed");
+          const updatedReviewer = normalizeReviewer(response.data.reviewer);
+          setReviewers((current) => current.map((item) => item.id === reviewer.id ? updatedReviewer : item));
+          notify(`Reviewer ${nextIsActive ? "activated" : "deactivated"}.`, "success");
+        } catch (requestError) {
+          const statusCode = requestError.response?.status;
+          notify(
+            statusCode === 401
+              ? "Your session has expired. Sign in and try again."
+              : statusCode === 403
+                ? "You do not have permission to update reviewers."
+                : "Unable to update this reviewer. Please try again.",
+            "error",
+          );
+          throw requestError;
+        } finally {
+          setUpdatingId(null);
+        }
+      },
+    });
   };
 
   return (
@@ -810,14 +781,12 @@ function Reviewers() {
 
         <InvitationForm
           busy={creatingInvitation}
-          feedback={invitationFormFeedback}
           onInvite={handleCreateInvitation}
         />
         <InvitationsSection
           invitations={invitations}
           loading={invitationsLoading}
           error={invitationsError}
-          actionFeedback={activeInvitationAction ? null : invitationActionFeedback}
           activeAction={activeInvitationAction}
           onRetry={loadInvitations}
           onResend={(invitation) => handleInvitationAction(invitation, "resend")}
@@ -1244,6 +1213,11 @@ function Reviewers() {
         </div>
         </section>
       </div>
+      <ConfirmationModal
+        open={Boolean(confirmation)}
+        {...confirmation}
+        onClose={() => setConfirmation(null)}
+      />
     </div>
   );
 }

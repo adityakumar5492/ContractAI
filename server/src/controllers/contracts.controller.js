@@ -1,18 +1,15 @@
-import fs from "fs/promises";
-import { createReadStream } from "fs";
 import path from "path";
 import { randomUUID } from "crypto";
 
 import pool from "../config/db.js";
 import aiIngestionService from "../services/aiIngestion.service.js";
+import supabase from "../config/supabase.js";
+import { deletePdf, uploadPdf } from "../services/storage.service.js";
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
-
-const getStorageDirectory = () =>
-  path.join(process.cwd(), "uploads", "contracts");
 
 const getSafeFileName = (fileName) => {
   return fileName
@@ -330,8 +327,6 @@ export const getContractDocument = async (req, res, next) => {
     }
 
     const { file_key: fileKey, file_name: fileName } = result.rows[0];
-    const storageDirectory = path.resolve(getStorageDirectory());
-
     if (typeof fileKey !== "string" || !fileKey.trim()) {
       return res.status(404).json({
         success: false,
@@ -339,93 +334,50 @@ export const getContractDocument = async (req, res, next) => {
       });
     }
 
-    const storedPath = path.resolve(process.cwd(), fileKey);
-    const relativePath = path.relative(storageDirectory, storedPath);
+    const { data, error } = await supabase.storage
+      .from("contractai-documents")
+      .download(fileKey);
 
-    if (
-      !relativePath ||
-      relativePath === ".." ||
-      relativePath.startsWith(`..${path.sep}`) ||
-      path.isAbsolute(relativePath)
-    ) {
-      return res.status(404).json({
-        success: false,
-        message: "Contract document not found",
-      });
-    }
-
-    let resolvedStorageDirectory;
-    let resolvedFilePath;
-
-    try {
-      [resolvedStorageDirectory, resolvedFilePath] = await Promise.all([
-        fs.realpath(storageDirectory),
-        fs.realpath(storedPath),
-      ]);
-    } catch (error) {
-      if (error.code === "ENOENT" || error.code === "ENOTDIR") {
+    if (error) {
+      if (String(error.statusCode) === "404") {
         return res.status(404).json({
           success: false,
           message: "Contract PDF file not found",
         });
       }
 
-      throw error;
+      const storageError = new Error("Unable to retrieve the contract PDF.");
+      storageError.statusCode = 503;
+      throw storageError;
     }
 
-    const resolvedRelativePath = path.relative(
-      resolvedStorageDirectory,
-      resolvedFilePath,
-    );
-
-    if (
-      !resolvedRelativePath ||
-      resolvedRelativePath === ".." ||
-      resolvedRelativePath.startsWith(`..${path.sep}`) ||
-      path.isAbsolute(resolvedRelativePath)
-    ) {
-      return res.status(404).json({
-        success: false,
-        message: "Contract document not found",
-      });
-    }
-
-    const fileStats = await fs.stat(resolvedFilePath);
-
-    if (!fileStats.isFile()) {
+    if (!data) {
       return res.status(404).json({
         success: false,
         message: "Contract PDF file not found",
       });
     }
 
+    const pdfBuffer = Buffer.from(await data.arrayBuffer());
     const safeFileName = getSafeFileName(path.basename(fileName || "contract.pdf")) || "contract.pdf";
 
     res.set({
       "Content-Type": "application/pdf",
       "Content-Disposition": `inline; filename="${safeFileName}"`,
-      "Content-Length": fileStats.size,
+      "Content-Length": pdfBuffer.length,
       "X-Content-Type-Options": "nosniff",
       "Cache-Control": "private, no-store",
     });
 
-    const fileStream = createReadStream(resolvedFilePath);
-    fileStream.on("error", (error) => {
-      if (res.headersSent) {
-        res.destroy(error);
-      } else {
-        next(error);
-      }
-    });
-
-    return fileStream.pipe(res);
+    return res.end(pdfBuffer);
   } catch (error) {
     next(error);
   }
 };
 
 export const uploadContract = async (req, res, next) => {
-  let storedFilePath = null;
+  let storagePath = null;
+  let storageUploaded = false;
   let client = null;
   let transactionCommitted = false;
 
@@ -498,19 +450,12 @@ export const uploadContract = async (req, res, next) => {
       });
     }
 
-    const storageDirectory = getStorageDirectory();
-
-    await fs.mkdir(storageDirectory, {
-      recursive: true,
-    });
-
     const fileId = randomUUID();
     const safeOriginalName = getSafeFileName(req.file.originalname);
     const storedFileName = `${fileId}-${safeOriginalName}`;
-
-    storedFilePath = path.join(storageDirectory, storedFileName);
-
-    await fs.writeFile(storedFilePath, req.file.buffer);
+    storagePath = `uploads/contracts/${storedFileName}`;
+    await uploadPdf(req.file.buffer, storagePath);
+    storageUploaded = true;
 
     client = await pool.connect();
 
@@ -552,8 +497,6 @@ export const uploadContract = async (req, res, next) => {
 
     const contract = contractResult.rows[0];
 
-    const fileKey = `uploads/contracts/${storedFileName}`;
-
     const documentResult = await client.query(
       `
         INSERT INTO contract_documents (
@@ -579,7 +522,7 @@ export const uploadContract = async (req, res, next) => {
       [
         contract.id,
         req.file.originalname,
-        fileKey,
+        storagePath,
         null,
         req.file.mimetype,
         req.file.size,
@@ -671,11 +614,11 @@ export const uploadContract = async (req, res, next) => {
       }
     }
 
-    if (storedFilePath && !transactionCommitted) {
+    if (storageUploaded && !transactionCommitted) {
       try {
-        await fs.unlink(storedFilePath);
-      } catch (fileError) {
-        console.error("Uploaded file cleanup failed:", fileError);
+        await deletePdf(storagePath);
+      } catch {
+        console.error("Uploaded contract cleanup failed in Supabase Storage.");
       }
     }
 

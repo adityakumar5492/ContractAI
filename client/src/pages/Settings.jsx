@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import {
   Building2,
-  CheckCircle2,
   Globe,
   Mail,
   MapPin,
@@ -11,6 +10,7 @@ import {
   AlertCircle,
 } from "lucide-react";
 import api from "../services/api";
+import { useNotifications } from "../contexts/NotificationContext";
 
 const emptyForm = {
   name: "",
@@ -24,11 +24,11 @@ const emptyForm = {
 };
 
 function Settings() {
+  const { notify } = useNotifications();
   const [form, setForm] = useState(emptyForm);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const [success, setSuccess] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -90,7 +90,6 @@ function Settings() {
       [name]: value,
     }));
 
-    setSuccess("");
     setError("");
   };
 
@@ -100,12 +99,11 @@ function Settings() {
     try {
       setSaving(true);
       setError("");
-      setSuccess("");
 
       const response = await api.patch("/company", form);
 
       if (!response.data?.success || !response.data?.company) {
-        setError("Unable to update company information.");
+        notify("Unable to update company information.", "error");
         return;
       }
 
@@ -122,11 +120,12 @@ function Settings() {
         legalContactEmail: company.legalContactEmail || "",
       });
 
-      setSuccess("Company information updated successfully.");
+      notify("Company information updated successfully.", "success");
     } catch (error) {
-      setError(
+      notify(
         error.response?.data?.message ||
           "Unable to update company information.",
+        "error",
       );
     } finally {
       setSaving(false);
@@ -174,17 +173,6 @@ function Settings() {
             />
 
             <p className="text-sm text-red-300">{error}</p>
-          </div>
-        )}
-
-        {success && (
-          <div className="mt-6 flex items-start gap-3 rounded-xl border border-emerald-500/20 bg-emerald-500/[0.06] px-4 py-3">
-            <CheckCircle2
-              size={17}
-              className="mt-0.5 shrink-0 text-emerald-400"
-            />
-
-            <p className="text-sm text-emerald-300">{success}</p>
           </div>
         )}
 

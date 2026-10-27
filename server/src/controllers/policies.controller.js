@@ -1,24 +1,13 @@
-import fs from "node:fs/promises";
-import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 
 import pool from "../config/db.js";
+import aiIngestionService from "../services/aiIngestion.service.js";
+import { deletePdf, uploadPdf } from "../services/storage.service.js";
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
-const getPolicyDirectory = () => path.join(process.cwd(), "uploads", "policies");
 const safeFileName = (name) => name.replace(/[^a-zA-Z0-9._-]/g, "_").replace(/_+/g, "_");
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-const resolveStoredPolicyFile = (fileKey) => {
-  const prefix = "uploads/policies/";
-  if (typeof fileKey !== "string" || !fileKey.startsWith(prefix)) return null;
-  const storedName = fileKey.slice(prefix.length);
-  if (!storedName || path.basename(storedName) !== storedName) return null;
-  const directory = path.resolve(getPolicyDirectory());
-  const target = path.resolve(directory, storedName);
-  return path.dirname(target) === directory ? target : null;
-};
 
 const mapPolicy = (policy) => ({
   id: policy.id,
@@ -173,7 +162,9 @@ export const deletePolicy = async (req, res, next) => {
       return res.status(404).json({ success: false, message: "Policy not found" });
     }
 
-    filePath = resolveStoredPolicyFile(policy.file_key);
+    filePath = typeof policy.file_key === "string" && policy.file_key.trim()
+      ? policy.file_key
+      : null;
     if (filePath) {
       const shared = await client.query(
         "SELECT 1 FROM policies WHERE file_key = $1 AND id <> $2 LIMIT 1",
@@ -201,20 +192,9 @@ export const deletePolicy = async (req, res, next) => {
     let fileCleanupPending = false;
     if (filePath && !fileIsShared) {
       try {
-        const directory = await fs.realpath(getPolicyDirectory());
-        const entry = await fs.lstat(filePath);
-        if (entry.isSymbolicLink()) {
-          fileCleanupPending = true;
-        } else {
-          const actualFilePath = await fs.realpath(filePath);
-          if (path.dirname(actualFilePath) !== directory) {
-            fileCleanupPending = true;
-          } else {
-            await fs.unlink(filePath);
-          }
-        }
-      } catch (fileError) {
-        if (fileError.code !== "ENOENT") fileCleanupPending = true;
+        await deletePdf(filePath);
+      } catch {
+        fileCleanupPending = true;
       }
     }
 
@@ -235,7 +215,9 @@ export const deletePolicy = async (req, res, next) => {
 };
 
 export const uploadPolicy = async (req, res, next) => {
-  let storedFilePath = null;
+  let storagePath = null;
+  let storageUploaded = false;
+  let transactionCommitted = false;
   let client = null;
 
   try {
@@ -261,15 +243,13 @@ export const uploadPolicy = async (req, res, next) => {
       return res.status(400).json({ success: false, message: "File name must be 255 characters or less." });
     }
 
-    const directory = getPolicyDirectory();
-    await fs.mkdir(directory, { recursive: true });
     const storedName = `${randomUUID()}-${safeFileName(req.file.originalname)}`;
-    storedFilePath = path.join(directory, storedName);
-    await fs.writeFile(storedFilePath, req.file.buffer, { flag: "wx" });
+    storagePath = `uploads/policies/${storedName}`;
+    await uploadPdf(req.file.buffer, storagePath);
+    storageUploaded = true;
 
     client = await pool.connect();
     await client.query("BEGIN");
-    const fileKey = `uploads/policies/${storedName}`;
     const insertResult = await client.query(
       `
         INSERT INTO policies (
@@ -283,9 +263,56 @@ export const uploadPolicy = async (req, res, next) => {
         VALUES ($1, $2, $3, $4, $5, $6)
         RETURNING id, title, description, file_name, is_active, created_at, updated_at
       `,
-      [req.companyId, req.userId, title, description || null, req.file.originalname, fileKey],
+      [req.companyId, req.userId, title, description || null, req.file.originalname, storagePath],
     );
     const policy = insertResult.rows[0];
+
+    let ingestionResult;
+    try {
+      ingestionResult = await aiIngestionService.ingestContractDocument(
+        req.file.buffer,
+        { documentId: policy.id },
+      );
+    } catch {
+      const ingestionError = new Error("Policy PDF processing failed. Please try again later.");
+      ingestionError.statusCode = 503;
+      throw ingestionError;
+    }
+
+    const chunks = ingestionResult?.chunks;
+    const validChunks =
+      ingestionResult?.documentId === policy.id &&
+      Array.isArray(chunks) &&
+      chunks.length > 0 &&
+      chunks.every((chunk) =>
+        Number.isInteger(chunk?.chunkIndex) &&
+        chunk.chunkIndex >= 0 &&
+        typeof chunk.content === "string" &&
+        chunk.content.trim().length > 0 &&
+        typeof chunk.qdrantPointId === "string" &&
+        chunk.qdrantPointId.trim().length > 0
+      );
+
+    if (!validChunks || ingestionResult.chunkCount !== chunks.length) {
+      const ingestionError = new Error("Policy PDF processing returned invalid chunk data.");
+      ingestionError.statusCode = 503;
+      throw ingestionError;
+    }
+
+    for (const chunk of chunks) {
+      await client.query(
+        `
+          INSERT INTO policy_chunks (
+            policy_id,
+            chunk_index,
+            content,
+            qdrant_point_id
+          )
+          VALUES ($1, $2, $3, $4)
+        `,
+        [policy.id, chunk.chunkIndex, chunk.content, chunk.qdrantPointId],
+      );
+    }
 
     await client.query(
       `
@@ -301,25 +328,26 @@ export const uploadPolicy = async (req, res, next) => {
       ],
     );
     await client.query("COMMIT");
+    transactionCommitted = true;
 
     return res.status(201).json({
       success: true,
       message: "Policy uploaded successfully.",
-      policy: mapPolicy({ ...policy, chunk_count: 0 }),
+      policy: mapPolicy({ ...policy, chunk_count: chunks.length }),
     });
   } catch (error) {
-    if (client) {
+    if (client && !transactionCommitted) {
       try {
         await client.query("ROLLBACK");
       } catch (rollbackError) {
         console.error("Policy upload rollback failed:", rollbackError);
       }
     }
-    if (storedFilePath) {
+    if (storageUploaded && !transactionCommitted) {
       try {
-        await fs.unlink(storedFilePath);
-      } catch (fileError) {
-        console.error("Policy file cleanup failed:", fileError);
+        await deletePdf(storagePath);
+      } catch {
+        console.error("Policy file cleanup failed in Supabase Storage.");
       }
     }
     return next(error);

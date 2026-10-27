@@ -4,6 +4,7 @@ import { useNavigate, useParams } from "react-router-dom";
 
 import api from "../services/api";
 import { useApplicationUser } from "../contexts/ApplicationUserContext";
+import { useNotifications } from "../contexts/NotificationContext";
 
 function getStatusLabel(status) {
   const labels = {
@@ -176,7 +177,6 @@ function ReviewSection({
   onNotesChange,
   onAction,
   busy,
-  error,
 }) {
   const review = contract.review;
   const status = review?.status || "NOT_ASSIGNED";
@@ -312,11 +312,6 @@ function ReviewSection({
           </button>
         )}
 
-        {error && (
-          <p role="alert" className="mt-3 text-sm text-red-300">
-            {error}
-          </p>
-        )}
       </div>
     </section>
   );
@@ -329,7 +324,6 @@ function FindingReviewSection({
   canReview,
   reviewStatus,
   busyFindingId,
-  feedback,
   onFindingStatus,
   onFindingComment,
 }) {
@@ -458,11 +452,6 @@ function FindingReviewSection({
             );
           })}
         </div>
-      )}
-      {feedback && (
-        <p role={feedback.type === "error" ? "alert" : "status"} className={`mt-3 text-sm ${feedback.type === "error" ? "text-red-300" : "text-emerald-300"}`}>
-          {feedback.message}
-        </p>
       )}
     </section>
   );
@@ -644,7 +633,6 @@ function ReviewerAssignmentCard({
   reviewersLoading,
   reviewersError,
   assigning,
-  feedback,
   onAssign,
 }) {
   const person = contract.reviewer;
@@ -704,14 +692,6 @@ function ReviewerAssignmentCard({
           {reviewersError && (
             <p role="alert" className="mt-2 text-xs text-red-300">
               {reviewersError}
-            </p>
-          )}
-          {feedback && (
-            <p
-              role={feedback.type === "error" ? "alert" : "status"}
-              className={`mt-2 text-xs ${feedback.type === "error" ? "text-red-300" : "text-emerald-300"}`}
-            >
-              {feedback.message}
             </p>
           )}
           {!reviewersLoading && !reviewersError && reviewers.length === 0 && (
@@ -781,19 +761,17 @@ function ContractDetails() {
 
   const [contract, setContract] = useState(null);
   const { user: currentUser } = useApplicationUser();
+  const { notify } = useNotifications();
   const [reviewNotes, setReviewNotes] = useState("");
   const [reviewData, setReviewData] = useState({ findings: [], review: null });
   const [reviewDataLoading, setReviewDataLoading] = useState(Boolean(id));
   const [reviewDataError, setReviewDataError] = useState("");
   const [findingBusyId, setFindingBusyId] = useState(null);
-  const [findingFeedback, setFindingFeedback] = useState(null);
   const [reviewBusy, setReviewBusy] = useState(false);
-  const [reviewError, setReviewError] = useState("");
   const [reviewers, setReviewers] = useState([]);
   const [reviewersLoading, setReviewersLoading] = useState(false);
   const [reviewersError, setReviewersError] = useState("");
   const [assigningReviewer, setAssigningReviewer] = useState(false);
-  const [assignmentFeedback, setAssignmentFeedback] = useState(null);
   const assignmentRequestPending = useRef(false);
   const [loading, setLoading] = useState(Boolean(id));
   const [error, setError] = useState(id ? "" : "Contract ID is missing.");
@@ -934,7 +912,6 @@ function ContractDetails() {
 
     assignmentRequestPending.current = true;
     setAssigningReviewer(true);
-    setAssignmentFeedback(null);
     try {
       const response = await api.patch(`/contracts/${contract.id}/assign`, {
         reviewerId,
@@ -953,7 +930,7 @@ function ContractDetails() {
           ? { ...current.review, ...response.data.review }
           : current.review,
       }));
-      setAssignmentFeedback({ type: "success", message: "Reviewer assignment updated." });
+      notify("Reviewer assignment updated.", "success");
     } catch (requestError) {
       const statusCode = requestError.response?.status;
       const message =
@@ -966,7 +943,7 @@ function ContractDetails() {
               : statusCode === 400
                 ? "That reviewer cannot be assigned. Choose an active reviewer."
                 : "Unable to update the reviewer assignment. Please try again.";
-      setAssignmentFeedback({ type: "error", message });
+      notify(message, "error");
     } finally {
       assignmentRequestPending.current = false;
       setAssigningReviewer(false);
@@ -978,7 +955,6 @@ function ContractDetails() {
 
     try {
       setReviewBusy(true);
-      setReviewError("");
 
       const response = await api.patch(`/reviews/${contract.review.id}`, {
         status,
@@ -991,12 +967,13 @@ function ContractDetails() {
         review: response.data.review,
       }));
       setReviewNotes(response.data.review.finalNotes || "");
-      setFindingFeedback({ type: "success", message: "Review status updated." });
+      notify("Review status updated.", "success");
       await refreshReviewData();
     } catch (requestError) {
-      setReviewError(
+      notify(
         requestError.response?.data?.message ||
           "Unable to update the review. Please try again.",
+        "error",
       );
     } finally {
       setReviewBusy(false);
@@ -1006,23 +983,19 @@ function ContractDetails() {
   const handleFindingStatus = async (findingId, status) => {
     if (findingBusyId) return;
     setFindingBusyId(findingId);
-    setFindingFeedback(null);
     try {
       await api.patch(`/contracts/${id}/findings/${findingId}`, { status });
       await refreshReviewData();
-      setFindingFeedback({ type: "success", message: `Finding ${status.toLowerCase()}.` });
+      notify(`Finding ${status.toLowerCase()}.`, "success");
     } catch (requestError) {
       const statusCode = requestError.response?.status;
-      setFindingFeedback({
-        type: "error",
-        message: statusCode === 401
+      notify(statusCode === 401
           ? "Your session has expired. Sign in and try again."
           : statusCode === 403
             ? "Only the assigned reviewer can update findings."
             : statusCode === 409
               ? "This finding is no longer pending or the review is not in progress. Refresh and try again."
-              : "Unable to update this finding. Please try again.",
-      });
+              : "Unable to update this finding. Please try again.", "error");
     } finally {
       setFindingBusyId(null);
     }
@@ -1031,17 +1004,14 @@ function ContractDetails() {
   const handleFindingComment = async (findingId, comment) => {
     if (findingBusyId || !comment?.trim()) return false;
     setFindingBusyId(findingId);
-    setFindingFeedback(null);
     try {
       await api.post(`/contracts/${id}/findings/${findingId}/comments`, { comment });
       await refreshReviewData();
-      setFindingFeedback({ type: "success", message: "Comment added." });
+      notify("Comment added.", "success");
       return true;
     } catch (requestError) {
       const statusCode = requestError.response?.status;
-      setFindingFeedback({
-        type: "error",
-        message: statusCode === 401
+      notify(statusCode === 401
           ? "Your session has expired. Sign in and try again."
           : statusCode === 403
             ? "Only the assigned reviewer can comment on findings."
@@ -1049,8 +1019,7 @@ function ContractDetails() {
               ? "Enter a comment before submitting."
               : statusCode === 409
                 ? "Comments can only be added while the review is in progress."
-                : "Unable to add your comment. Please try again.",
-      });
+                : "Unable to add your comment. Please try again.", "error");
       return false;
     } finally {
       setFindingBusyId(null);
@@ -1224,7 +1193,6 @@ function ContractDetails() {
           onNotesChange={setReviewNotes}
           onAction={handleReviewAction}
           busy={reviewBusy}
-          error={reviewError}
         />
 
         <FindingReviewSection
@@ -1234,7 +1202,6 @@ function ContractDetails() {
           canReview={currentUser?.role === "REVIEWER" && currentUser.id === contract.assignedReviewerId}
           reviewStatus={contract.review?.status}
           busyFindingId={findingBusyId}
-          feedback={findingFeedback}
           onFindingStatus={handleFindingStatus}
           onFindingComment={handleFindingComment}
         />
@@ -1247,7 +1214,6 @@ function ContractDetails() {
             reviewersLoading={reviewersLoading}
             reviewersError={reviewersError}
             assigning={assigningReviewer}
-            feedback={assignmentFeedback}
             onAssign={handleAssignReviewer}
           />
 

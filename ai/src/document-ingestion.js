@@ -34,17 +34,28 @@ async function ingestContractDocument(input, options = {}) {
     throw new Error('Unable to connect to the ContractAI Qdrant collection.');
   }
 
+  let indexingResult;
   try {
-    await indexDocumentChunks(client, documentId, chunkResult.chunks);
+    indexingResult = await indexDocumentChunks(client, documentId, chunkResult.chunks);
   } catch {
     throw new Error('Unable to index the PDF chunks in Qdrant.');
   }
+
+  const pointIdsByChunkIndex = new Map(
+    indexingResult.embeddings.map(({ chunkIndex, pointId }) => [chunkIndex, pointId]),
+  );
 
   return {
     documentId,
     pageCount: extracted.pageCount,
     characterCount: extracted.characterCount,
     chunkCount: chunkResult.totalChunks,
+    chunks: chunkResult.chunks.map((chunk) => ({
+      chunkIndex: chunk.index,
+      content: chunk.text,
+      characterCount: chunk.characterCount,
+      qdrantPointId: pointIdsByChunkIndex.get(chunk.index),
+    })),
   };
 }
 

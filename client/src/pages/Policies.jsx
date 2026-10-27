@@ -17,6 +17,8 @@ import {
 
 import api from "../services/api";
 import { useApplicationUser } from "../contexts/ApplicationUserContext";
+import { useNotifications } from "../contexts/NotificationContext";
+import ConfirmationModal from "../components/ConfirmationModal";
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
 
@@ -151,12 +153,12 @@ function PolicyDetailsModal({ policy, loading, error, isAdmin, busy, onClose, on
 
 function Policies() {
   const { role } = useApplicationUser();
+  const { notify } = useNotifications();
   const [policies, setPolicies] = useState([]);
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("ALL");
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
-  const [success, setSuccess] = useState("");
   const [uploadOpen, setUploadOpen] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
@@ -166,7 +168,7 @@ function Policies() {
   const [policyDetailsLoading, setPolicyDetailsLoading] = useState(false);
   const [policyDetailsError, setPolicyDetailsError] = useState("");
   const [policyActionId, setPolicyActionId] = useState(null);
-  const [actionError, setActionError] = useState("");
+  const [confirmation, setConfirmation] = useState(null);
 
   const loadPolicies = useCallback(async (showLoader = true) => {
     if (showLoader) {
@@ -236,7 +238,6 @@ function Policies() {
   const handleUpload = async (event) => {
     event.preventDefault();
     setUploadError("");
-    setSuccess("");
     if (!form.title.trim()) {
       setUploadError("Policy name is required.");
       return;
@@ -257,10 +258,10 @@ function Policies() {
       if (!response.data?.success) throw new Error("Policy upload failed");
       setUploadOpen(false);
       resetUpload();
-      setSuccess("Policy uploaded successfully.");
+      notify("Policy uploaded successfully.", "success");
       await loadPolicies();
     } catch (error) {
-      setUploadError(getRequestMessage(error, "Unable to upload this policy. Check the file and try again."));
+      notify(getRequestMessage(error, "Unable to upload this policy. Check the file and try again."), "error");
     } finally {
       setUploading(false);
     }
@@ -284,18 +285,16 @@ function Policies() {
   const handlePolicyToggle = async (policy) => {
     if (!policy?.id || policyActionId) return;
     setPolicyActionId(policy.id);
-    setActionError("");
-    setSuccess("");
     try {
       const isActive = !policy.isActive;
       const response = await api.patch(`/policies/${policy.id}/status`, { isActive });
       if (!response.data?.success) throw new Error("Policy status update failed");
       setPolicies((current) => current.map((item) => item.id === policy.id ? { ...item, isActive, status: isActive ? "ACTIVE" : "INACTIVE", updatedAt: response.data.policy?.updatedAt || new Date().toISOString() } : item));
       setSelectedPolicy((current) => current?.id === policy.id ? { ...current, isActive, status: isActive ? "ACTIVE" : "INACTIVE", updatedAt: response.data.policy?.updatedAt || new Date().toISOString() } : current);
-      setSuccess(`Policy ${isActive ? "activated" : "deactivated"} successfully.`);
+      notify(`Policy ${isActive ? "activated" : "deactivated"} successfully.`, "success");
       await loadPolicies(false);
     } catch (error) {
-      setActionError(getRequestMessage(error, "Unable to update this policy. Please try again."));
+      notify(getRequestMessage(error, "Unable to update this policy. Please try again."), "error");
     } finally {
       setPolicyActionId(null);
     }
@@ -303,24 +302,33 @@ function Policies() {
 
   const handlePolicyDelete = async (policy) => {
     if (!policy?.id || policyActionId) return;
-    const confirmed = window.confirm(`Delete “${policy.title}”? This will permanently remove the policy and its stored chunks.`);
-    if (!confirmed) return;
     setPolicyActionId(policy.id);
-    setActionError("");
-    setSuccess("");
     try {
       const response = await api.delete(`/policies/${policy.id}`);
       if (!response.data?.success) throw new Error("Policy deletion failed");
       setPolicies((current) => current.filter((item) => item.id !== policy.id));
       setSelectedPolicy((current) => current?.id === policy.id ? null : current);
-      setSuccess(response.data.fileCleanupPending
+      notify(response.data.fileCleanupPending
         ? "Policy deleted. Its stored PDF could not be removed and may require cleanup."
-        : "Policy deleted successfully.");
+        : "Policy deleted successfully.", response.data.fileCleanupPending ? "info" : "success");
     } catch (error) {
-      setActionError(getRequestMessage(error, "Unable to delete this policy. Please try again."));
+      notify(getRequestMessage(error, "Unable to delete this policy. Please try again."), "error");
+      throw error;
     } finally {
       setPolicyActionId(null);
     }
+  };
+
+  const requestPolicyDelete = (policy) => {
+    if (policyActionId) return;
+    setConfirmation({
+      title: "Delete policy?",
+      message: `Delete “${policy.title}”? This will permanently remove the policy and its stored chunks.`,
+      confirmLabel: "Delete policy",
+      destructive: true,
+      errorMessage: "Unable to delete this policy. Please try again.",
+      onConfirm: () => handlePolicyDelete(policy),
+    });
   };
 
   return (
@@ -338,9 +346,6 @@ function Policies() {
             </button>
           )}
         </div>
-
-        {success && <p role="status" className="mt-5 rounded-xl border border-emerald-500/15 bg-emerald-500/[0.05] px-4 py-3 text-sm text-emerald-300">{success}</p>}
-        {actionError && <p role="alert" className="mt-5 rounded-xl border border-red-500/15 bg-red-500/[0.05] px-4 py-3 text-sm text-red-300">{actionError}</p>}
 
         <div className="mt-7 grid grid-cols-2 gap-3 lg:grid-cols-4">
           {[
@@ -434,9 +439,14 @@ function Policies() {
           busy={Boolean(policyActionId)}
           onClose={() => { setSelectedPolicy(null); setPolicyDetailsError(""); }}
           onToggle={handlePolicyToggle}
-          onDelete={handlePolicyDelete}
+          onDelete={requestPolicyDelete}
         />
       )}
+      <ConfirmationModal
+        open={Boolean(confirmation)}
+        {...confirmation}
+        onClose={() => setConfirmation(null)}
+      />
     </div>
   );
 }
