@@ -1,0 +1,4 @@
+const DEFAULT_RESULT_LIMIT = 5;
+const MAX_RESULT_LIMIT = 100;
+
+module.exports = { DEFAULT_RESULT_LIMIT, MAX_RESULT_LIMIT };

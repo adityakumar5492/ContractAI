@@ -1,0 +1,26 @@
+{
+  "name": "ai",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "test:qdrant": "node --env-file=.env scripts/test-qdrant.js",
+    "test:document": "node scripts/test-document.js",
+    "test:embeddings": "node --env-file=.env scripts/test-embeddings.js",
+    "test:retrieval": "node --env-file=.env scripts/test-retrieval.js",
+    "test:rag": "node --env-file=.env scripts/test-rag.js",
+    "test:ingestion": "node --env-file=.env scripts/test-ingestion.js",
+    "test:clauses": "node --env-file=.env scripts/test-clauses.js",
+    "test:risks": "node --env-file=.env scripts/test-risks.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@langchain/textsplitters": "^1.0.2",
+    "@qdrant/js-client-rest": "^1.20.0",
+    "groq-sdk": "^1.6.0",
+    "pdf-parse": "^2.4.5"
+  }
+}
